@@ -1,0 +1,2 @@
+[lcd]
+path = "/dev/ttyACM0"
