@@ -9,4 +9,5 @@ edition = "2021"
 anyhow = "1.0"
 cfa635 = { git = "https://github.com/agausmann/cfa635-rs.git" }
 serde = { version = "1.0", features = ["derive"] }
+sysinfo = "0.23"
 toml = "0.5"
