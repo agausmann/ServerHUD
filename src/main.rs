@@ -51,18 +51,22 @@ fn main() -> anyhow::Result<()> {
                             lcd.set_backlight(100, 100)?;
                             // Force refresh
                             next_refresh = now;
+                        } else {
+                            match key {
+                                Key::Left => {
+                                    current_page = current_page.prev();
+                                    next_refresh = now;
+                                    lcd.clear_screen()?;
+                                }
+                                Key::Right => {
+                                    current_page = current_page.next();
+                                    next_refresh = now;
+                                    lcd.clear_screen()?;
+                                }
+                                _ => {}
+                            }
                         }
                         screen_timeout = Some(now + SCREEN_TIMEOUT);
-
-                        match key {
-                            Key::Left => {
-                                //TODO prev page
-                            }
-                            Key::Right => {
-                                //TODO next page
-                            }
-                            _ => {}
-                        }
                     }
                     _ => {}
                 }
