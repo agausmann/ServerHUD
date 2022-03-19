@@ -21,6 +21,7 @@ struct App {
     next_refresh: Instant,
     screen_timeout: Option<Instant>,
     lcd: cfa635::Device,
+    should_redraw: bool,
     current_page: Page,
     scroll: usize,
     max_scroll: Option<usize>,
@@ -51,6 +52,7 @@ impl App {
             next_refresh: now,
             screen_timeout: Some(now),
             lcd,
+            should_redraw: false,
             current_page: Page::System,
             scroll: 0,
             max_scroll: None,
@@ -77,11 +79,16 @@ impl App {
             // Make a new "now" that is after the poll,
             // so if queue_refresh was called, we immediately refresh:
             let now = Instant::now();
-            if self.is_awake() && now >= self.next_refresh {
-                self.refresh()?;
+            if now >= self.next_refresh {
+                self.refresh();
                 while now >= self.next_refresh {
                     self.next_refresh += REFRESH_INTERVAL;
                 }
+            }
+
+            if self.should_redraw {
+                self.redraw()?;
+                self.should_redraw = false;
             }
 
             std::thread::sleep(Duration::from_millis(10));
@@ -98,25 +105,25 @@ impl App {
                                 self.current_page = self.current_page.prev();
                                 self.scroll = 0;
                                 self.max_scroll = None;
-                                self.queue_refresh();
+                                self.queue_redraw();
                             }
                             Key::Right => {
                                 self.current_page = self.current_page.next();
                                 self.scroll = 0;
                                 self.max_scroll = None;
-                                self.queue_refresh();
+                                self.queue_redraw();
                             }
                             Key::Up => {
                                 if self.scroll > 0 {
                                     self.scroll -= 1;
-                                    self.queue_refresh();
+                                    self.queue_redraw();
                                 }
                             }
                             Key::Down => {
                                 if let Some(max_scroll) = self.max_scroll {
                                     if self.scroll < max_scroll {
                                         self.scroll += 1;
-                                        self.queue_refresh();
+                                        self.queue_redraw();
                                     }
                                 }
                             }
@@ -141,9 +148,9 @@ impl App {
         self.screen_timeout = Some(Instant::now() + SCREEN_TIMEOUT);
         if was_asleep {
             // Instead of turning on backlight here,
-            // it is deferred until the end of refresh after the LCD is updated.
+            // it is deferred until the end of redraw after the LCD is updated.
             // Otherwise, the old contents might be briefly displayed.
-            self.queue_refresh();
+            self.queue_redraw();
         }
         was_asleep
     }
@@ -152,11 +159,21 @@ impl App {
         self.screen_timeout.is_some()
     }
 
-    fn queue_refresh(&mut self) {
-        self.next_refresh = Instant::now();
+    fn queue_redraw(&mut self) {
+        self.should_redraw = true;
     }
 
-    fn refresh(&mut self) -> anyhow::Result<()> {
+    fn refresh(&mut self) {
+        self.system.refresh_cpu();
+        self.system.refresh_memory();
+        self.system.refresh_disks_list();
+        self.system.refresh_networks_list();
+        if self.is_awake() {
+            self.queue_redraw();
+        }
+    }
+
+    fn redraw(&mut self) -> anyhow::Result<()> {
         self.clear();
         if let Some(name) = self.system.host_name() {
             self.set_text(0, 0, name.as_bytes());
@@ -164,9 +181,6 @@ impl App {
 
         match self.current_page {
             Page::System => {
-                self.system.refresh_cpu();
-                self.system.refresh_memory();
-
                 let load_avg = self.system.load_average();
                 let load_avg_str = format!(
                     "CPU: {:.2} {:.2} {:.2}",
@@ -180,8 +194,6 @@ impl App {
                 self.set_text(2, 0, memory_str.as_bytes());
             }
             Page::Disk => {
-                self.system.refresh_disks_list();
-
                 let disks = self.system.disks();
                 let sorted_disks = disks
                     .iter()
@@ -230,8 +242,6 @@ impl App {
                 }
             }
             Page::Network => {
-                self.system.refresh_networks_list();
-
                 let sorted_networks: BTreeMap<&String, &NetworkData> =
                     self.system.networks().iter().collect();
 
