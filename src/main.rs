@@ -8,7 +8,7 @@ use std::{
 use anyhow::Context;
 use cfa635::{Key, Report, NUM_COLUMNS, NUM_ROWS};
 use config::Config;
-use sysinfo::{Disk, DiskExt, System, SystemExt};
+use sysinfo::{Disk, DiskExt, NetworkData, NetworkExt, NetworksExt, System, SystemExt};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -181,8 +181,6 @@ impl App {
             }
             Page::Disk => {
                 self.system.refresh_disks_list();
-                self.max_scroll = Some(self.system.disks().len() - (NUM_ROWS as usize - 1));
-                self.scroll = self.scroll.min(self.max_scroll.unwrap());
 
                 let disks = self.system.disks();
                 let sorted_disks = disks
@@ -191,7 +189,7 @@ impl App {
                     .collect::<BTreeMap<_, _>>();
 
                 let display_disks: Vec<&Disk> = if self.config.disk.paths.is_empty() {
-                    sorted_disks.values().copied().collect()
+                    sorted_disks.into_values().collect()
                 } else {
                     self.config
                         .disk
@@ -200,6 +198,10 @@ impl App {
                         .flat_map(|key| sorted_disks.get(key).copied())
                         .collect()
                 };
+
+                let max_scroll = display_disks.len().saturating_sub(NUM_ROWS as usize - 1);
+                self.max_scroll = Some(max_scroll);
+                self.scroll = self.scroll.min(max_scroll);
 
                 // Creating an intermediate collection; otherwise, we would
                 // be calling `set_text` while `system` is still borrowed.
@@ -229,8 +231,40 @@ impl App {
             }
             Page::Network => {
                 self.system.refresh_networks_list();
-                // max_scroll = Some(system.networks().len());
-                // scroll = scroll.min(max_scroll.unwrap());
+
+                let sorted_networks: BTreeMap<&String, &NetworkData> =
+                    self.system.networks().iter().collect();
+
+                let display_networks: Vec<(&String, &NetworkData)> =
+                    if self.config.network.interfaces.is_empty() {
+                        sorted_networks.into_iter().collect()
+                    } else {
+                        self.config
+                            .network
+                            .interfaces
+                            .iter()
+                            .flat_map(|key| sorted_networks.get(key).copied().map(|net| (key, net)))
+                            .collect()
+                    };
+
+                let max_scroll = display_networks.len().saturating_sub(NUM_ROWS as usize - 1);
+                self.max_scroll = Some(max_scroll);
+                self.scroll = self.scroll.min(max_scroll);
+
+                let lines: Vec<String> = display_networks
+                    .into_iter()
+                    .skip(self.scroll)
+                    .take(NUM_ROWS as usize - 1)
+                    .map(|(name, net)| {
+                        let up = net.transmitted() as f32 / REFRESH_INTERVAL.as_secs_f32() * 8.0e-6;
+                        let down = net.received() as f32 / REFRESH_INTERVAL.as_secs_f32() * 8.0e-6;
+                        format!("{} {:.1}/{:.1} M", name, up, down)
+                    })
+                    .collect();
+
+                for (i, line) in lines.into_iter().enumerate() {
+                    self.set_text(i + 1, 0, line.as_bytes());
+                }
             }
         }
         self.flush()?;
@@ -246,7 +280,9 @@ impl App {
     }
 
     fn set_text(&mut self, row: usize, col: usize, text: &[u8]) {
-        self.buffer[row][col..][..text.len()].copy_from_slice(text);
+        let line = &mut self.buffer[row][col..];
+        let clamped_len = text.len().min(line.len());
+        line[..clamped_len].copy_from_slice(&text[..clamped_len]);
     }
 
     fn flush(&mut self) -> anyhow::Result<()> {
