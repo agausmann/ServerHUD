@@ -1,11 +1,14 @@
 pub mod config;
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 
 use anyhow::Context;
-use cfa635::{Key, Report, NUM_COLUMNS};
+use cfa635::{Key, Report, NUM_COLUMNS, NUM_ROWS};
 use config::Config;
-use sysinfo::{System, SystemExt};
+use sysinfo::{Disk, DiskExt, System, SystemExt};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -61,6 +64,8 @@ fn main() -> anyhow::Result<()> {
     let mut next_refresh = Instant::now();
     let mut screen_timeout = Some(Instant::now());
     let mut current_page = Page::System;
+    let mut scroll: usize = 0;
+    let mut max_scroll: Option<usize> = None;
 
     loop {
         let now = Instant::now();
@@ -81,13 +86,29 @@ fn main() -> anyhow::Result<()> {
                             match key {
                                 Key::Left => {
                                     current_page = current_page.prev();
+                                    scroll = 0;
+                                    max_scroll = None;
                                     next_refresh = now;
                                     lcd.clear_screen()?;
                                 }
                                 Key::Right => {
                                     current_page = current_page.next();
+                                    scroll = 0;
+                                    max_scroll = None;
                                     next_refresh = now;
                                     lcd.clear_screen()?;
+                                }
+                                Key::Up => {
+                                    if scroll > 0 {
+                                        scroll -= 1;
+                                        next_refresh = now;
+                                    }
+                                }
+                                Key::Down => {
+                                    if let Some(max_scroll) = max_scroll {
+                                        scroll = (scroll + 1).min(max_scroll);
+                                        next_refresh = now;
+                                    }
                                 }
                                 _ => {}
                             }
@@ -105,7 +126,8 @@ fn main() -> anyhow::Result<()> {
             }
             if screen_timeout.is_some() {
                 if let Some(name) = system.host_name() {
-                    lcd.set_text(0, 0, &pad_line(name))?;
+                    lcd.set_text(0, 0, &BLANK_LINE)?;
+                    lcd.set_text(0, 0, name.as_bytes())?;
                 }
 
                 match current_page {
@@ -118,18 +140,56 @@ fn main() -> anyhow::Result<()> {
                             "CPU: {:.2} {:.2} {:.2}",
                             load_avg.one, load_avg.five, load_avg.fifteen,
                         );
-                        lcd.set_text(1, 0, &pad_line(load_avg_str))?;
+                        lcd.set_text(1, 0, &BLANK_LINE)?;
+                        lcd.set_text(1, 0, load_avg_str.as_bytes())?;
 
                         let total = kb_to_mib(system.total_memory());
                         let unavailable = total - kb_to_mib(system.available_memory());
                         let memory_str = format!("Mem: {}/{} M", unavailable, total);
-                        lcd.set_text(2, 0, &pad_line(memory_str))?;
+                        lcd.set_text(2, 0, &BLANK_LINE)?;
+                        lcd.set_text(2, 0, memory_str.as_bytes())?;
                     }
                     Page::Disk => {
                         system.refresh_disks_list();
+                        max_scroll = Some(system.disks().len() - (NUM_ROWS as usize - 1));
+                        scroll = scroll.min(max_scroll.unwrap());
+
+                        let disks = system.disks();
+                        let sorted_disks = disks
+                            .iter()
+                            .map(|disk| (disk.mount_point().to_string_lossy().into_owned(), disk))
+                            .collect::<BTreeMap<_, _>>();
+                        println!("{:?}", sorted_disks);
+
+                        let display_disks: Vec<&Disk> = if config.disk.paths.is_empty() {
+                            sorted_disks.values().copied().collect()
+                        } else {
+                            config
+                                .disk
+                                .paths
+                                .iter()
+                                .flat_map(|key| sorted_disks.get(key).copied())
+                                .collect()
+                        };
+
+                        for (i, disk) in display_disks.into_iter().skip(scroll).take(3).enumerate()
+                        {
+                            let total = disk.total_space() >> 30;
+                            let unavailable = total.saturating_sub(disk.available_space() >> 30);
+                            let disk_str = format!(
+                                "{} {}/{} G",
+                                disk.mount_point().to_string_lossy(),
+                                unavailable,
+                                total
+                            );
+                            lcd.set_text(i as u8 + 1, 0, &BLANK_LINE)?;
+                            lcd.set_text(i as u8 + 1, 0, disk_str.as_bytes())?;
+                        }
                     }
                     Page::Network => {
                         system.refresh_networks_list();
+                        // max_scroll = Some(system.networks().len());
+                        // scroll = scroll.min(max_scroll.unwrap());
                     }
                 }
             }
@@ -146,14 +206,7 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn pad_line<V>(vec: V) -> Vec<u8>
-where
-    V: Into<Vec<u8>>,
-{
-    let mut vec = vec.into();
-    vec.resize(NUM_COLUMNS as usize, b' ');
-    vec
-}
+const BLANK_LINE: [u8; NUM_COLUMNS as usize] = [b' '; NUM_COLUMNS as usize];
 
 fn kb_to_mib(x: u64) -> u64 {
     x * 1024 / 1000 / 1024

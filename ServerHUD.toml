@@ -1,2 +1,8 @@
 [lcd]
 path = "/dev/ttyACM0"
+
+[disk]
+paths = []
+
+[network]
+interfaces = []
