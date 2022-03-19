@@ -10,6 +10,8 @@ pub struct Config {
 #[derive(Deserialize)]
 pub struct Lcd {
     pub path: String,
+    pub screen_backlight: u8,
+    pub keypad_backlight: u8,
 }
 
 #[derive(Deserialize)]

@@ -279,7 +279,10 @@ impl App {
         }
         self.flush()?;
         // Deferred backlight control from wake():
-        self.lcd.set_backlight(100, 100)?;
+        self.lcd.set_backlight(
+            self.config.lcd.screen_backlight,
+            self.config.lcd.keypad_backlight,
+        )?;
         Ok(())
     }
 

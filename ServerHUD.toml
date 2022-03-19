@@ -1,5 +1,7 @@
 [lcd]
 path = "/dev/ttyACM0"
+screen_backlight = 100
+keypad_backlight = 100
 
 [disk]
 paths = []
