@@ -2,6 +2,7 @@ pub mod config;
 
 use std::{
     collections::BTreeMap,
+    path::Path,
     time::{Duration, Instant},
 };
 
@@ -26,6 +27,9 @@ struct App {
     scroll: usize,
     max_scroll: Option<usize>,
     buffer: [[u8; NUM_COLUMNS as usize]; NUM_ROWS as usize],
+
+    md_warnings: Vec<String>,
+    md_errors: Vec<String>,
 }
 
 impl App {
@@ -57,6 +61,8 @@ impl App {
             scroll: 0,
             max_scroll: None,
             buffer: [[b' '; NUM_COLUMNS as usize]; NUM_ROWS as usize],
+            md_warnings: Vec::new(),
+            md_errors: Vec::new(),
         })
     }
 
@@ -102,16 +108,10 @@ impl App {
                     if !self.wake() {
                         match key {
                             Key::Left => {
-                                self.current_page = self.current_page.prev();
-                                self.scroll = 0;
-                                self.max_scroll = None;
-                                self.queue_redraw();
+                                self.set_page(self.current_page.prev());
                             }
                             Key::Right => {
-                                self.current_page = self.current_page.next();
-                                self.scroll = 0;
-                                self.max_scroll = None;
-                                self.queue_redraw();
+                                self.set_page(self.current_page.next());
                             }
                             Key::Up => {
                                 if self.scroll > 0 {
@@ -127,6 +127,10 @@ impl App {
                                     }
                                 }
                             }
+                            Key::Enter | Key::Exit if self.current_page == Page::Messages => {
+                                // Acknowledge messages.
+                                self.set_page(Page::System);
+                            }
                             _ => {}
                         }
                     }
@@ -135,6 +139,13 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    fn set_page(&mut self, page: Page) {
+        self.current_page = page;
+        self.scroll = 0;
+        self.max_scroll = None;
+        self.queue_redraw();
     }
 
     fn sleep(&mut self) -> anyhow::Result<()> {
@@ -147,6 +158,11 @@ impl App {
         let was_asleep = self.screen_timeout.is_none();
         self.screen_timeout = Some(Instant::now() + SCREEN_TIMEOUT);
         if was_asleep {
+            // If we have messages to display, then start in messages page.
+            if !self.md_warnings.is_empty() || !self.md_errors.is_empty() {
+                self.set_page(Page::Messages);
+            }
+
             // Instead of turning on backlight here,
             // it is deferred until the end of redraw after the LCD is updated.
             // Otherwise, the old contents might be briefly displayed.
@@ -164,22 +180,125 @@ impl App {
     }
 
     fn refresh(&mut self) {
+        // All off: Working
+        self.lcd.set_led(0, 0, 0).ok();
+        self.lcd.set_led(1, 0, 0).ok();
+        self.lcd.set_led(2, 0, 0).ok();
+        self.lcd.set_led(3, 0, 0).ok();
+
         self.system.refresh_cpu();
         self.system.refresh_memory();
         self.system.refresh_disks_list();
         self.system.refresh_networks_list();
+
+        self.check_md_raid();
+
+        if self.md_warnings.is_empty() && self.md_errors.is_empty() {
+            // 1x green: idle, OK
+            self.lcd.set_led(0, 0, 100).ok();
+            self.lcd.set_led(1, 0, 0).ok();
+            self.lcd.set_led(2, 0, 0).ok();
+            self.lcd.set_led(3, 0, 0).ok();
+        } else {
+            // Errors indicated by 1 red LED
+            let errors = (0..self.md_errors.len()).map(|_| (100, 0));
+
+            // Warnings indicated by 1 yellow LED
+            let warnings = (0..self.md_warnings.len()).map(|_| (100, 100));
+
+            // Turn the remaining LEDs off.
+            let default = std::iter::repeat((0, 0));
+
+            let scroll = if self.is_awake() && self.current_page == Page::Messages {
+                self.scroll
+            } else {
+                0
+            };
+
+            for (i, (r, g)) in errors
+                .chain(warnings)
+                .chain(default)
+                .skip(scroll)
+                .take(4)
+                .enumerate()
+            {
+                self.lcd.set_led(i as u8, r, g).ok();
+            }
+        }
+
         if self.is_awake() {
             self.queue_redraw();
         }
     }
 
+    fn check_md_raid(&mut self) {
+        self.md_warnings = Vec::new();
+        self.md_errors = Vec::new();
+
+        for dev in self.config.disk.md_raid.clone() {
+            if let Err(e) = self.check_md_dev(&dev) {
+                eprintln!("{dev}: query error: {e}");
+                self.md_warnings.push(format!("{dev}: query error"));
+            }
+        }
+    }
+
+    fn check_md_dev(&mut self, dev: &str) -> anyhow::Result<()> {
+        let md_path = Path::new("/sys/block/").join(dev).join("md");
+
+        let degraded = std::fs::read_to_string(md_path.join("degraded"))?;
+        if degraded.trim() != "0" {
+            self.md_warnings.push(format!("md: {dev} DEGRADED"));
+        }
+
+        let num_disks: usize = std::fs::read_to_string(md_path.join("raid_disks"))?
+            .trim()
+            .parse()?;
+        for i in 0..num_disks {
+            let disk_path = md_path.join(format!("rd{i}"));
+            if !disk_path.exists() {
+                self.md_errors.push(format!("{dev}: rd{i} NOTFOUND"));
+                continue;
+            }
+            let state = std::fs::read_to_string(disk_path.join("state"))?;
+            if state.trim() != "in_sync" {
+                self.md_errors.push(format!(
+                    "{dev}: rd{i} {}",
+                    state.trim().to_ascii_uppercase()
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     fn redraw(&mut self) -> anyhow::Result<()> {
         self.clear();
-        if let Some(name) = self.system.host_name() {
-            self.set_text(0, 0, name.as_bytes());
+        if self.current_page != Page::Messages {
+            if let Some(name) = self.system.host_name() {
+                self.set_text(0, 0, name.as_bytes());
+            }
         }
 
         match self.current_page {
+            Page::Messages => {
+                let max_scroll = (self.md_errors.len() + self.md_warnings.len())
+                    .saturating_sub(NUM_ROWS as usize - 1);
+                self.max_scroll = Some(max_scroll);
+                self.scroll = self.scroll.min(max_scroll);
+                let lines: Vec<String> = self
+                    .md_errors
+                    .iter()
+                    .chain(&self.md_warnings)
+                    .skip(self.scroll)
+                    .take(NUM_ROWS as usize - 1)
+                    .cloned()
+                    .collect();
+
+                for (i, line) in lines.into_iter().enumerate() {
+                    self.set_text(i, 0, line.as_bytes());
+                }
+            }
             Page::System => {
                 let load_avg = self.system.load_average();
                 let load_avg_str = format!(
@@ -306,8 +425,9 @@ impl App {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Page {
+    Messages,
     System,
     Disk,
     Network,
@@ -316,6 +436,8 @@ enum Page {
 impl Page {
     fn next(&self) -> Self {
         match self {
+            // Messages cannot be dismissed by page select.
+            Self::Messages => Self::Messages,
             Self::System => Self::Disk,
             Self::Disk => Self::Network,
             Self::Network => Self::System,
@@ -324,6 +446,8 @@ impl Page {
 
     fn prev(&self) -> Self {
         match self {
+            // Messages cannot be dismissed by page select.
+            Self::Messages => Self::Messages,
             Self::Disk => Self::System,
             Self::Network => Self::Disk,
             Self::System => Self::Network,

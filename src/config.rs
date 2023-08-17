@@ -17,6 +17,7 @@ pub struct Lcd {
 #[derive(Deserialize)]
 pub struct Disk {
     pub paths: Vec<String>,
+    pub md_raid: Vec<String>,
 }
 
 #[derive(Deserialize)]
